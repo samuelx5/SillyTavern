@@ -3,6 +3,15 @@ import { getConfigValue, tryParse } from './util.js';
 
 const PROMPT_PLACEHOLDER = getConfigValue('promptPlaceholder', 'Let\'s get started.');
 
+const REASONING_EFFORT = {
+    auto: 'auto',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    min: 'min',
+    max: 'max',
+};
+
 /**
  * @typedef {object} PromptNames
  * @property {string} charName Character name
@@ -353,24 +362,14 @@ export function convertCohereMessages(messages, names) {
 /**
  * Convert a prompt from the ChatML objects to the format used by Google MakerSuite models.
  * @param {object[]} messages Array of messages
- * @param {string} model Model name
+ * @param {string} _model Model name
  * @param {boolean} useSysPrompt Use system prompt
  * @param {PromptNames} names Prompt names
- * @returns {{contents: *[], system_instruction: {parts: {text: string}}}} Prompt for Google MakerSuite models
+ * @returns {{contents: *[], system_instruction: {parts: {text: string}[]}}} Prompt for Google MakerSuite models
  */
-export function convertGooglePrompt(messages, model, useSysPrompt, names) {
-    const visionSupportedModelPrefix = [
-        'gemini-1.5',
-        'gemini-2.0',
-        'gemini-2.5',
-        'gemini-exp-1114',
-        'gemini-exp-1121',
-        'gemini-exp-1206',
-    ];
+export function convertGooglePrompt(messages, _model, useSysPrompt, names) {
+    const sysPrompt = [];
 
-    const isMultimodal = visionSupportedModelPrefix.some(prefix => model.startsWith(prefix));
-
-    let sys_prompt = '';
     if (useSysPrompt) {
         while (messages.length > 1 && messages[0].role === 'system') {
             // Append example names if not already done by the frontend (e.g. for group chats).
@@ -384,12 +383,12 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
                     messages[0].content = `${names.charName}: ${messages[0].content}`;
                 }
             }
-            sys_prompt += `${messages[0].content}\n\n`;
+            sysPrompt.push(messages[0].content);
             messages.shift();
         }
     }
 
-    const system_instruction = { parts: [{ text: sys_prompt.trim() }] };
+    const system_instruction = { parts: sysPrompt.map(text => ({ text })) };
     const toolNameMap = {};
 
     const contents = [];
@@ -468,7 +467,7 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
 
                     toolNameMap[toolCall.id] = toolCall.function.name;
                 });
-            } else if (part.type === 'image_url' && isMultimodal) {
+            } else if (part.type === 'image_url') {
                 const mimeType = part.image_url.url.split(';')[0].split(':')[1];
                 const base64Data = part.image_url.url.split(',')[1];
                 parts.push({
@@ -919,24 +918,31 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth) {
 }
 
 /**
- * Calculate the budget tokens for a given reasoning effort.
+ * Calculate the Claude budget tokens for a given reasoning effort.
  * @param {number} maxTokens Maximum tokens
  * @param {string} reasoningEffort Reasoning effort
  * @param {boolean} stream If streaming is enabled
  * @returns {number} Budget tokens
  */
-export function calculateBudgetTokens(maxTokens, reasoningEffort, stream) {
+export function calculateClaudeBudgetTokens(maxTokens, reasoningEffort, stream) {
     let budgetTokens = 0;
 
     switch (reasoningEffort) {
-        case 'low':
+        case REASONING_EFFORT.min:
+            budgetTokens = 1024;
+            break;
+        case REASONING_EFFORT.low:
             budgetTokens = Math.floor(maxTokens * 0.1);
             break;
-        case 'medium':
+        case REASONING_EFFORT.auto:
+        case REASONING_EFFORT.medium:
             budgetTokens = Math.floor(maxTokens * 0.25);
             break;
-        case 'high':
+        case REASONING_EFFORT.high:
             budgetTokens = Math.floor(maxTokens * 0.5);
+            break;
+        case REASONING_EFFORT.max:
+            budgetTokens = Math.floor(maxTokens * 0.95);
             break;
     }
 
@@ -945,6 +951,40 @@ export function calculateBudgetTokens(maxTokens, reasoningEffort, stream) {
     if (!stream) {
         budgetTokens = Math.min(budgetTokens, 21333);
     }
+
+    return budgetTokens;
+}
+
+/**
+ * Calculate the Google budget tokens for a given reasoning effort.
+ * @param {number} maxTokens Maximum tokens
+ * @param {string} reasoningEffort Reasoning effort
+ * @returns {number?} Budget tokens
+ */
+export function calculateGoogleBudgetTokens(maxTokens, reasoningEffort) {
+    let budgetTokens = 0;
+
+    switch (reasoningEffort) {
+        case REASONING_EFFORT.auto:
+            return null;
+        case REASONING_EFFORT.min:
+            budgetTokens = 0;
+            break;
+        case REASONING_EFFORT.low:
+            budgetTokens = Math.floor(maxTokens * 0.1);
+            break;
+        case REASONING_EFFORT.medium:
+            budgetTokens = Math.floor(maxTokens * 0.25);
+            break;
+        case REASONING_EFFORT.high:
+            budgetTokens = Math.floor(maxTokens * 0.5);
+            break;
+        case REASONING_EFFORT.max:
+            budgetTokens = maxTokens;
+            break;
+    }
+
+    budgetTokens = Math.min(budgetTokens, 24576);
 
     return budgetTokens;
 }
