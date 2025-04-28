@@ -1,28 +1,30 @@
 import {
     amount_gen,
+    callPopup,
     getRequestHeaders,
-    main_api,
     max_context,
-    resultCheckStatus,
     saveSettingsDebounced,
     setGenerationProgress,
-    setOnlineStatus,
 } from '../script.js';
 import { SECRET_KEYS, writeSecret } from './secrets.js';
 import { delay } from './utils.js';
 import { isMobile } from './RossAscends-mods.js';
 import { autoSelectInstructPreset } from './instruct-mode.js';
 import { t } from './i18n.js';
-import { callGenericPopup, POPUP_TYPE } from './popup.js';
-import { kai_settings } from './kai-settings.js';
 
 export {
+    horde_settings,
+    generateHorde,
+    checkHordeStatus,
+    loadHordeSettings,
+    adjustHordeGenerationParams,
+    getHordeModels,
     MIN_LENGTH,
 };
 
 let models = [];
 
-export let horde_settings = {
+let horde_settings = {
     models: [],
     auto_adjust_response_length: true,
     auto_adjust_context_length: false,
@@ -103,11 +105,11 @@ async function cancelTask(taskId) {
  * Checks if Horde is online.
  * @returns {Promise<boolean>} True if Horde is online, false otherwise
  */
-export async function checkHordeStatus() {
+async function checkHordeStatus() {
     try {
         const response = await fetch('/api/horde/status', {
             method: 'POST',
-            headers: getRequestHeaders({ omitContentType: true }),
+            headers: getRequestHeaders(),
         });
 
         if (!response.ok) {
@@ -122,17 +124,6 @@ export async function checkHordeStatus() {
     }
 }
 
-export async function getStatusHorde() {
-    try {
-        const hordeStatus = await checkHordeStatus();
-        setOnlineStatus(hordeStatus ? t`Connected` : 'no_connection');
-    } catch {
-        setOnlineStatus('no_connection');
-    }
-
-    return resultCheckStatus();
-}
-
 function validateHordeModel() {
     let selectedModels = models.filter(m => horde_settings.models.includes(m.name));
 
@@ -144,7 +135,7 @@ function validateHordeModel() {
     return selectedModels;
 }
 
-export async function adjustHordeGenerationParams(max_context_length, max_length) {
+async function adjustHordeGenerationParams(max_context_length, max_length) {
     console.log(max_context_length, max_length);
     const workers = await getWorkers(false);
     let maxContextLength = max_context_length;
@@ -199,16 +190,16 @@ function setContextSizePreview() {
  * @returns {Promise<{text: *, workerName: string}>}
  * @throws {Error}
  */
-export async function generateHorde(prompt, params, signal, reportProgress) {
+async function generateHorde(prompt, params, signal, reportProgress) {
     validateHordeModel();
     delete params.prompt;
 
     // No idea what these do
-    params.n = 1;
-    params.frmtadsnsp = false;
-    params.frmtrmblln = false;
-    params.frmtrmspch = false;
-    params.frmttriminc = false;
+    params['n'] = 1;
+    params['frmtadsnsp'] = false;
+    params['frmtrmblln'] = false;
+    params['frmtrmspch'] = false;
+    params['frmttriminc'] = false;
 
     const payload = {
         'prompt': prompt,
@@ -280,7 +271,7 @@ export async function generateHorde(prompt, params, signal, reportProgress) {
         await delay(CHECK_INTERVAL);
     }
 
-    await callGenericPopup(t`Horde request timed out. Try again`, POPUP_TYPE.TEXT);
+    callPopup('Horde request timed out. Try again', 'text');
     throw new Error('Horde timeout');
 }
 
@@ -289,7 +280,7 @@ export async function generateHorde(prompt, params, signal, reportProgress) {
  * Displays the available models in the Horde model selection dropdown.
  * @param {boolean} force Force refresh of the models
  */
-export async function getHordeModels(force) {
+async function getHordeModels(force) {
     const sortByPerformance = (a, b) => b.performance - a.performance;
     const sortByWhitelisted = (a, b) => b.is_whitelisted - a.is_whitelisted;
     const sortByPopular = (a, b) => b.tags?.includes('popular') - a.tags?.includes('popular');
@@ -314,7 +305,7 @@ export async function getHordeModels(force) {
     setContextSizePreview();
 }
 
-export function loadHordeSettings(settings) {
+function loadHordeSettings(settings) {
     if (settings.horde_settings) {
         Object.assign(horde_settings, settings.horde_settings);
     }
@@ -327,7 +318,7 @@ export function loadHordeSettings(settings) {
 async function showKudos() {
     const response = await fetch('/api/horde/user-info', {
         method: 'POST',
-        headers: getRequestHeaders({ omitContentType: true }),
+        headers: getRequestHeaders(),
     });
 
     if (!response.ok) {
@@ -342,9 +333,8 @@ async function showKudos() {
         return;
     }
 
-    console.log('Horde user data', data.user, 'shared key data', data.sharedKey);
-    const kudos = data.sharedKey?.kudos ?? data.user?.kudos ?? 0;
-    toastr.info(`Kudos: ${kudos}`, data.user.username);
+    console.log('Horde user data', data);
+    toastr.info(`Kudos: ${data.kudos}`, data.username);
 }
 
 function hordeModelTextString(model) {
@@ -354,15 +344,6 @@ function hordeModelTextString(model) {
 
 function hordeModelQueueStateString(model) {
     return `ETA: ${model.eta}s, Speed: ${model.performance}, Queue: ${model.queued}, Workers: ${model.count}`;
-}
-
-export function isHordeGenerationNotAllowed() {
-    if (main_api == 'koboldhorde' && kai_settings.preset_settings == 'gui') {
-        toastr.error(t`GUI Settings preset is not supported for Horde. Please select another preset.`);
-        return true;
-    }
-
-    return false;
 }
 
 function getHordeModelTemplate(option) {
@@ -413,11 +394,10 @@ function getHordeModelTemplate(option) {
     `));
 }
 
-export function initHorde() {
+export function initHorde () {
     $('#horde_model').on('mousedown change', async function (e) {
         console.log('Horde model change', e);
-        const modelValue = $('#horde_model').val();
-        horde_settings.models = Array.isArray(modelValue) ? modelValue : [];
+        horde_settings.models = $('#horde_model').val();
         console.log('Updated Horde models', horde_settings.models);
 
         // Try select instruct preset
@@ -449,12 +429,8 @@ export function initHorde() {
         saveSettingsDebounced();
     });
 
-    $('#horde_api_key_button').on('click', async function () {
-        const key = String($('#horde_api_key').val()).trim();
-        if (!key) {
-            toastr.warning(t`Please enter your Horde API key`);
-            return;
-        }
+    $('#horde_api_key').on('input', async function () {
+        const key = String($(this).val()).trim();
         await writeSecret(SECRET_KEYS.HORDE, key);
     });
 
@@ -475,5 +451,5 @@ export function initHorde() {
             templateResult: getHordeModelTemplate,
         });
     }
-}
+};
 
