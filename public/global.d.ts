@@ -1,6 +1,6 @@
 import libs from './lib';
 import getContext from './scripts/st-context';
-import { power_user, getThemeObject } from './scripts/power-user';
+import { power_user } from './scripts/power-user';
 import { QuickReplyApi } from './scripts/extensions/quick-reply/api/QuickReplyApi';
 import { oai_settings } from './scripts/openai';
 import { textgenerationwebui_settings } from './scripts/textgen-settings';
@@ -8,7 +8,6 @@ import { FileAttachment } from './scripts/chats';
 import { ReasoningMessageExtra } from './scripts/reasoning';
 import { IGNORE_SYMBOL, OVERSWIPE_BEHAVIOR } from './scripts/constants';
 import { ToolInvocation } from './scripts/tool-calling';
-import { getWorldInfoSettings } from './scripts/world-info';
 
 declare global {
     // Custom types
@@ -17,11 +16,9 @@ declare global {
     type ReasoningSettings = typeof power_user.reasoning;
     type ChatCompletionSettings = typeof oai_settings;
     type TextCompletionSettings = typeof textgenerationwebui_settings;
-    type WorldInfoSettings = ReturnType<typeof getWorldInfoSettings>;
     type MessageTimestamp = string | number | Date;
     type Character = import('./scripts/char-data').v1CharData;
     type ChatMessageExtra = BaseMessageExtra & Partial<ReasoningMessageExtra> & Record<string, any>;
-    type Theme = ReturnType<typeof getThemeObject>;
 
     interface Group {
         id: string;
@@ -39,7 +36,6 @@ declare global {
         avatar_url?: string;
         hideMutedSprites?: boolean;
         fav?: boolean;
-        date_last_chat?: MessageTimestamp;
     }
 
     interface ChatFile extends Array<ChatMessage> {
@@ -139,8 +135,6 @@ declare global {
     interface ImageGenerationAttachmentProps {
         generation_type?: number;
         negative?: string;
-        width?: number;
-        height?: number;
     }
 
     interface ImageCaptionAttachmentProps {
@@ -238,12 +232,4 @@ declare global {
     };
 
     type SwipeEvent = JQuery.TriggeredEvent<any, any, HTMLElement, HTMLElement>;
-}
-
-//Overrides for public/scripts/chats.js
-declare module 'dompurify' {
-    interface Config {
-        MESSAGE_SANITIZE?: boolean;
-        MESSAGE_ALLOW_SYSTEM_UI?: boolean;
-    }
 }
