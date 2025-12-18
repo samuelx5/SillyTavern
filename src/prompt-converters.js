@@ -12,6 +12,25 @@ const REASONING_EFFORT = {
     max: 'max',
 };
 
+export const PROMPT_PROCESSING_TYPE = {
+    NONE: '',
+    /** @deprecated Use MERGE instead. */
+    CLAUDE: 'claude',
+    MERGE: 'merge',
+    MERGE_TOOLS: 'merge_tools',
+    SEMI: 'semi',
+    SEMI_TOOLS: 'semi_tools',
+    STRICT: 'strict',
+    STRICT_TOOLS: 'strict_tools',
+    SINGLE: 'single',
+};
+
+// 'auto' is intentionally unmapped
+const GEMINI_MEDIA_RESOLUTION = {
+    low: 'media_resolution_low',
+    high: 'media_resolution_high',
+};
+
 /**
  * @typedef {object} PromptNames
  * @property {string} charName Character name
@@ -34,6 +53,53 @@ export function getPromptNames(request) {
             return this.groupNames.some(name => message.startsWith(`${name}: `));
         },
     };
+}
+
+/**
+ * Adds an assistant prefix to the last message.
+ * @param {any[]} prompt Prompt messages array
+ * @param {any[]} tools Array of tool definitions
+ * @param {string} property The property to set the prefix on
+ * @returns {any[]} Transformed messages array
+ */
+export function addAssistantPrefix(prompt, tools, property) {
+    if (!prompt.length) {
+        return prompt;
+    }
+    const hasAnyTools = (Array.isArray(tools) && tools.length > 0) || prompt.some(x => x.role === 'tool');
+    if (!hasAnyTools && prompt[prompt.length - 1].role === 'assistant') {
+        prompt[prompt.length - 1][property] = true;
+    }
+    return prompt;
+}
+
+/**
+ * Applies a post-processing step to the generated messages.
+ * @param {object[]} messages Messages to post-process
+ * @param {string} type Prompt conversion type
+ * @param {PromptNames} names Prompt names
+ * @returns
+ */
+export function postProcessPrompt(messages, type, names) {
+    switch (type) {
+        case PROMPT_PROCESSING_TYPE.MERGE:
+        case PROMPT_PROCESSING_TYPE.CLAUDE:
+            return mergeMessages(messages, names, { strict: false, placeholders: false, single: false, tools: false });
+        case PROMPT_PROCESSING_TYPE.MERGE_TOOLS:
+            return mergeMessages(messages, names, { strict: false, placeholders: false, single: false, tools: true });
+        case PROMPT_PROCESSING_TYPE.SEMI:
+            return mergeMessages(messages, names, { strict: true, placeholders: false, single: false, tools: false });
+        case PROMPT_PROCESSING_TYPE.SEMI_TOOLS:
+            return mergeMessages(messages, names, { strict: true, placeholders: false, single: false, tools: true });
+        case PROMPT_PROCESSING_TYPE.STRICT:
+            return mergeMessages(messages, names, { strict: true, placeholders: true, single: false, tools: false });
+        case PROMPT_PROCESSING_TYPE.STRICT_TOOLS:
+            return mergeMessages(messages, names, { strict: true, placeholders: true, single: false, tools: true });
+        case PROMPT_PROCESSING_TYPE.SINGLE:
+            return mergeMessages(messages, names, { strict: true, placeholders: false, single: true, tools: false });
+        default:
+            return messages;
+    }
 }
 
 /**
@@ -351,23 +417,18 @@ export function convertCohereMessages(messages, names) {
         }
     });
 
-    // A prompt should end with a user/tool message
-    if (messages.length && !['user', 'tool'].includes(messages[messages.length - 1].role)) {
-        messages[messages.length - 1].role = 'user';
-    }
-
     return { chatHistory: messages };
 }
 
 /**
  * Convert a prompt from the ChatML objects to the format used by Google MakerSuite models.
  * @param {object[]} messages Array of messages
- * @param {string} _model Model name
+ * @param {string} model Model name
  * @param {boolean} useSysPrompt Use system prompt
  * @param {PromptNames} names Prompt names
  * @returns {{contents: *[], system_instruction: {parts: {text: string}[]}}} Prompt for Google MakerSuite models
  */
-export function convertGooglePrompt(messages, _model, useSysPrompt, names) {
+export function convertGooglePrompt(messages, model, useSysPrompt, names) {
     const sysPrompt = [];
 
     if (useSysPrompt) {
@@ -446,6 +507,30 @@ export function convertGooglePrompt(messages, _model, useSysPrompt, names) {
         //create the prompt parts
         const parts = [];
         message.content.forEach((part) => {
+            const addDataUrlPart = (/** @type {string} */ url, /** @type {string} */ defaultMimeType, /** @type {string?} */ detail = null) => {
+                if (url && url.startsWith('data:')) {
+                    const [header, base64Data] = url.split(',');
+                    const mimeType = header.match(/data:([^;]+)/)?.[1] || defaultMimeType;
+                    const mediaResolution = GEMINI_MEDIA_RESOLUTION[detail] || null;
+
+                    const part = {
+                        inlineData: {
+                            mimeType: mimeType,
+                            data: base64Data,
+                        },
+                    };
+
+                    // https://ai.google.dev/gemini-api/docs/gemini-3#media_resolution
+                    if (/gemini-3/.test(model) && mediaResolution) {
+                        part.mediaResolution = {
+                            level: mediaResolution,
+                        };
+                    }
+
+                    parts.push(part);
+                }
+            };
+
             if (part.type === 'text') {
                 parts.push({ text: part.text });
             } else if (part.type === 'tool_call_id') {
@@ -463,21 +548,48 @@ export function convertGooglePrompt(messages, _model, useSysPrompt, names) {
                             name: toolCall.function.name,
                             args: tryParse(toolCall.function.arguments) ?? toolCall.function.arguments,
                         },
+                        ...(toolCall.signature ? { thoughtSignature: toolCall.signature } : {}),
                     });
 
                     toolNameMap[toolCall.id] = toolCall.function.name;
                 });
             } else if (part.type === 'image_url') {
-                const mimeType = part.image_url.url.split(';')[0].split(':')[1];
-                const base64Data = part.image_url.url.split(',')[1];
-                parts.push({
-                    inlineData: {
-                        mimeType: mimeType,
-                        data: base64Data,
-                    },
-                });
+                const imageUrl = part.image_url?.url;
+                const detail = part.image_url?.detail;
+                addDataUrlPart(imageUrl, 'image/png', detail);
+            } else if (part.type === 'video_url') {
+                const videoUrl = part.video_url?.url;
+                const detail = part.video_url?.detail;
+                addDataUrlPart(videoUrl, 'video/mp4', detail);
+            } else if (part.type === 'audio_url') {
+                const audioUrl = part.audio_url?.url;
+                addDataUrlPart(audioUrl, 'audio/mpeg');
             }
         });
+
+        // https://ai.google.dev/gemini-api/docs/gemini-3#migrating_from_other_models
+        // Inject stored thought signatures, or fall back to bypass magic for Gemini 3
+        if (/gemini-3/.test(model) || /gemini-2\.5/.test(model)) {
+            const skipSignatureMagic = 'skip_thought_signature_validator';
+            const textSignature = message.signature;
+
+            parts.forEach((part) => {
+                if (textSignature && typeof part.text === 'string') {
+                    part.thoughtSignature = textSignature;
+                } else if (/gemini-3/.test(model)) {
+                    // Gemini 3: Fall back to bypass magic for function calls (mandatory) and images
+                    if (part.functionCall && !part.thoughtSignature) {
+                        part.thoughtSignature = skipSignatureMagic;
+                    }
+                    if (/-image/.test(model) && message.role === 'model') {
+                        if (typeof part.text === 'string' || part.inlineData) {
+                            part.thoughtSignature = skipSignatureMagic;
+                        }
+                    }
+                }
+                // Gemini 2.5 without stored signatures: signatures are optional, no bypass needed
+            });
+        }
 
         // merge consecutive messages with the same role
         if (index > 0 && message.role === contents[contents.length - 1].role) {
@@ -490,7 +602,7 @@ export function convertGooglePrompt(messages, _model, useSysPrompt, names) {
                         contents[contents.length - 1].parts.push(part);
                     }
                 }
-                if (part.inlineData || part.functionCall || part.functionResponse) {
+                if (part.inlineData || part.functionCall || part.functionResponse || part.thoughtSignature || part.mediaResolution) {
                     contents[contents.length - 1].parts.push(part);
                 }
             });
@@ -700,11 +812,14 @@ export function convertXAIMessages(messages, names) {
  * Merge messages with the same consecutive role, removing names if they exist.
  * @param {any[]} messages Messages to merge
  * @param {PromptNames} names Prompt names
- * @param {boolean} strict Enable strict mode: only allow one system message at the start, force user first message
- * @param {boolean} placeholders Add user placeholders to the messages in strict mode
+ * @param {object} options Options for merging
+ * @param {boolean} [options.strict] Enable strict mode: only allow one system message at the start, force user first message
+ * @param {boolean} [options.placeholders] Add user placeholders to the messages in strict mode
+ * @param {boolean} [options.single] Force every role to be user, merging all messages into one
+ * @param {boolean} [options.tools] Allow tool calls in the prompt. If false, tool call messages are removed.
  * @returns {any[]} Merged messages
  */
-export function mergeMessages(messages, names, strict, placeholders) {
+export function mergeMessages(messages, names, { strict = false, placeholders = false, single = false, tools = false } = {}) {
     let mergedMessages = [];
 
     /** @type {Map<string,object>} */
@@ -722,7 +837,7 @@ export function mergeMessages(messages, names, strict, placeholders) {
                     return content.text;
                 }
                 // Could be extended with other non-text types
-                if (content.type === 'image_url') {
+                if (['image_url', 'video_url', 'audio_url'].includes(content.type)) {
                     const token = crypto.randomBytes(32).toString('base64');
                     contentTokens.set(token, content);
                     return token;
@@ -746,17 +861,33 @@ export function mergeMessages(messages, names, strict, placeholders) {
                 message.content = `${message.name}: ${message.content}`;
             }
         }
-        if (message.role === 'tool') {
+        if (message.role === 'tool' && !tools) {
+            message.role = 'user';
+        }
+        if (single) {
+            if (message.role === 'assistant') {
+                if (names.charName && !message.content.startsWith(`${names.charName}: `) && !names.startsWithGroupName(message.content)) {
+                    message.content = `${names.charName}: ${message.content}`;
+                }
+            }
+            if (message.role === 'user') {
+                if (names.userName && !message.content.startsWith(`${names.userName}: `)) {
+                    message.content = `${names.userName}: ${message.content}`;
+                }
+            }
+
             message.role = 'user';
         }
         delete message.name;
-        delete message.tool_calls;
-        delete message.tool_call_id;
+        if (!tools) {
+            delete message.tool_calls;
+            delete message.tool_call_id;
+        }
     });
 
     // Squash consecutive messages with the same role
     messages.forEach((message) => {
-        if (mergedMessages.length > 0 && mergedMessages[mergedMessages.length - 1].role === message.role && message.content) {
+        if (mergedMessages.length > 0 && mergedMessages[mergedMessages.length - 1].role === message.role && message.content && message.role !== 'tool') {
             mergedMessages[mergedMessages.length - 1].content += '\n\n' + message.content;
         } else {
             mergedMessages.push(message);
@@ -812,7 +943,7 @@ export function mergeMessages(messages, names, strict, placeholders) {
                 mergedMessages.unshift({ role: 'user', content: PROMPT_PLACEHOLDER });
             }
         }
-        return mergeMessages(mergedMessages, names, false, placeholders);
+        return mergeMessages(mergedMessages, names, { strict: false, placeholders, single: false, tools });
     }
 
     return mergedMessages;
@@ -843,7 +974,13 @@ export function convertTextCompletionPrompt(messages) {
     return messageStrings.join('\n') + '\nassistant:';
 }
 
-export function cachingAtDepthForClaude(messages, cachingAtDepth) {
+/**
+ * Append cache_control object to a Claude messages at depth. Directly modifies the messages array.
+ * @param {any[]} messages Messages to modify
+ * @param {number} cachingAtDepth Depth at which caching is supposed to occur
+ * @param {string} ttl TTL value
+ */
+export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
     let passedThePrefill = false;
     let depth = 0;
     let previousRoleName = '';
@@ -858,7 +995,7 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth) {
         if (messages[i].role !== previousRoleName) {
             if (depth === cachingAtDepth || depth === cachingAtDepth + 2) {
                 const content = messages[i].content;
-                content[content.length - 1].cache_control = { type: 'ephemeral' };
+                content[content.length - 1].cache_control = { type: 'ephemeral', ttl: ttl };
             }
 
             if (depth === cachingAtDepth + 2) {
@@ -876,8 +1013,9 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth) {
  * messages array.
  * @param {object[]} messages Array of messages
  * @param {number} cachingAtDepth Depth at which caching is supposed to occur
+ * @param {string} ttl TTL value
  */
-export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth) {
+export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl) {
     //caching the prefill is a terrible idea in general
     let passedThePrefill = false;
     //depth here is the number of message role switches
@@ -897,12 +1035,13 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth) {
                     messages[i].content = [{
                         type: 'text',
                         text: content,
-                        cache_control: { type: 'ephemeral' },
+                        cache_control: { type: 'ephemeral', ttl: ttl },
                     }];
                 } else {
                     const contentPartCount = content.length;
                     content[contentPartCount - 1].cache_control = {
                         type: 'ephemeral',
+                        ttl: ttl,
                     };
                 }
             }
@@ -922,19 +1061,20 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth) {
  * @param {number} maxTokens Maximum tokens
  * @param {string} reasoningEffort Reasoning effort
  * @param {boolean} stream If streaming is enabled
- * @returns {number} Budget tokens
+ * @returns {number?} Budget tokens
  */
 export function calculateClaudeBudgetTokens(maxTokens, reasoningEffort, stream) {
     let budgetTokens = 0;
 
     switch (reasoningEffort) {
+        case REASONING_EFFORT.auto:
+            return null;
         case REASONING_EFFORT.min:
             budgetTokens = 1024;
             break;
         case REASONING_EFFORT.low:
             budgetTokens = Math.floor(maxTokens * 0.1);
             break;
-        case REASONING_EFFORT.auto:
         case REASONING_EFFORT.medium:
             budgetTokens = Math.floor(maxTokens * 0.25);
             break;
@@ -959,34 +1099,191 @@ export function calculateClaudeBudgetTokens(maxTokens, reasoningEffort, stream) 
  * Calculate the Google budget tokens for a given reasoning effort.
  * @param {number} maxTokens Maximum tokens
  * @param {string} reasoningEffort Reasoning effort
- * @returns {number?} Budget tokens
+ * @param {string} model Model name
+ * @returns {number|string|null} Budget tokens
  */
-export function calculateGoogleBudgetTokens(maxTokens, reasoningEffort) {
-    let budgetTokens = 0;
+export function calculateGoogleBudgetTokens(maxTokens, reasoningEffort, model) {
+    function getFlashBudget() {
+        let budgetTokens = 0;
 
-    switch (reasoningEffort) {
-        case REASONING_EFFORT.auto:
-            return null;
-        case REASONING_EFFORT.min:
-            budgetTokens = 0;
-            break;
-        case REASONING_EFFORT.low:
-            budgetTokens = Math.floor(maxTokens * 0.1);
-            break;
-        case REASONING_EFFORT.medium:
-            budgetTokens = Math.floor(maxTokens * 0.25);
-            break;
-        case REASONING_EFFORT.high:
-            budgetTokens = Math.floor(maxTokens * 0.5);
-            break;
-        case REASONING_EFFORT.max:
-            budgetTokens = maxTokens;
-            break;
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return -1;
+            case REASONING_EFFORT.min:
+                return 0;
+            case REASONING_EFFORT.low:
+                budgetTokens = Math.floor(maxTokens * 0.1);
+                break;
+            case REASONING_EFFORT.medium:
+                budgetTokens = Math.floor(maxTokens * 0.25);
+                break;
+            case REASONING_EFFORT.high:
+                budgetTokens = Math.floor(maxTokens * 0.5);
+                break;
+            case REASONING_EFFORT.max:
+                budgetTokens = maxTokens;
+                break;
+        }
+
+        budgetTokens = Math.min(budgetTokens, 24576);
+
+        return budgetTokens;
     }
 
-    budgetTokens = Math.min(budgetTokens, 24576);
+    function getFlashLiteBudget() {
+        let budgetTokens = 0;
 
-    return budgetTokens;
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return -1;
+            case REASONING_EFFORT.min:
+                return 0;
+            case REASONING_EFFORT.low:
+                budgetTokens = Math.floor(maxTokens * 0.1);
+                break;
+            case REASONING_EFFORT.medium:
+                budgetTokens = Math.floor(maxTokens * 0.25);
+                break;
+            case REASONING_EFFORT.high:
+                budgetTokens = Math.floor(maxTokens * 0.5);
+                break;
+            case REASONING_EFFORT.max:
+                budgetTokens = maxTokens;
+                break;
+        }
+
+        budgetTokens = Math.max(Math.min(budgetTokens, 24576), 512);
+
+        return budgetTokens;
+    }
+
+    function getProBudget() {
+        let budgetTokens = 0;
+
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return -1;
+            case REASONING_EFFORT.min:
+                budgetTokens = 128;
+                break;
+            case REASONING_EFFORT.low:
+                budgetTokens = Math.floor(maxTokens * 0.1);
+                break;
+            case REASONING_EFFORT.medium:
+                budgetTokens = Math.floor(maxTokens * 0.25);
+                break;
+            case REASONING_EFFORT.high:
+                budgetTokens = Math.floor(maxTokens * 0.5);
+                break;
+            case REASONING_EFFORT.max:
+                budgetTokens = maxTokens;
+                break;
+        }
+
+        budgetTokens = Math.max(Math.min(budgetTokens, 32768), 128);
+
+        return budgetTokens;
+    }
+
+    function getGemini3FlashBudget() {
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return null;
+            case REASONING_EFFORT.min:
+                return 'minimal';
+            case REASONING_EFFORT.low:
+                return 'low';
+            case REASONING_EFFORT.medium:
+                return 'medium';
+            case REASONING_EFFORT.high:
+                return 'high';
+            case REASONING_EFFORT.max:
+                return 'high';
+        }
+
+        return null;
+    }
+
+    function getGemini3ProBudget() {
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return null;
+            case REASONING_EFFORT.min:
+                return 'low';
+            case REASONING_EFFORT.low:
+                return 'low';
+            case REASONING_EFFORT.medium:
+                return 'low';
+            case REASONING_EFFORT.high:
+                return 'high';
+            case REASONING_EFFORT.max:
+                return 'high';
+        }
+
+        return null;
+    }
+
+    if (/gemini-3-pro/.test(model)) {
+        return getGemini3ProBudget();
+    }
+
+    if (/gemini-3-flash/.test(model) ) {
+        return getGemini3FlashBudget();
+    }
+
+    if (/flash-lite/.test(model)) {
+        return getFlashLiteBudget();
+    }
+
+    if (/flash/.test(model)) {
+        return getFlashBudget();
+    }
+
+    if (/pro/.test(model)) {
+        return getProBudget();
+    }
+
+    return null;
+}
+
+/**
+ * Embed media content in OpenRouter messages.
+ * @param {object[]} messages Array of messages
+ */
+export function embedOpenRouterMedia(messages) {
+    if (!Array.isArray(messages)) {
+        return;
+    }
+
+    for (const message of messages) {
+        if (!Array.isArray(message.content)) {
+            continue;
+        }
+
+        for (const contentPart of message.content) {
+            if (contentPart?.type === 'video_url' && contentPart.video_url?.url?.startsWith('data:')) {
+                contentPart.type = 'input_video';
+            }
+
+            if (contentPart?.type === 'audio_url' && contentPart.audio_url?.url?.startsWith('data:')) {
+                const formatMap = {
+                    'audio/mpeg': 'mp3',
+                    'audio/wav': 'wav',
+                };
+
+                const [header, base64Data] = contentPart.audio_url.url.split(',');
+                const mimeType = header.match(/data:([^;]+)/)?.[1] || 'audio/mpeg';
+
+                contentPart.type = 'input_audio';
+                contentPart.input_audio = {
+                    format: formatMap[mimeType] || 'mp3',
+                    data: base64Data,
+                };
+
+                delete contentPart.audio_url;
+            }
+        }
+    }
 }
 
 /**
@@ -1005,5 +1302,65 @@ export function addReasoningContentToToolCalls(messages) {
         }
 
         message.reasoning_content = '';
+    }
+}
+
+/**
+ * Converts reasoning signatures to OpenRouter format.
+ * @param {object[]} messages Array of messages
+ * @param {string} model Model name
+ * @return {void}
+ */
+export function addOpenRouterSignatures(messages, model) {
+    const getFormatForModel = () => {
+        if (/google\/gemini/.test(model)) {
+            return 'google-gemini-v1';
+        }
+        if (/anthropic\/claude/.test(model)) {
+            return 'anthropic-claude-v1';
+        }
+        if (/openai\/gpt/.test(model)) {
+            return 'openai-responses-v1';
+        }
+        if (/x-ai\/grok/.test(model)) {
+            return 'xai-responses-v1';
+        }
+        return 'unknown';
+    };
+
+    if (!Array.isArray(messages)) {
+        return;
+    }
+
+    for (const message of messages) {
+        const details = [];
+        const addDetail = (data, id) => {
+            if (typeof data !== 'string' || data.length === 0) {
+                return;
+            }
+            const detail = {
+                index: details.length,
+                id: id || `signature-${details.length}`,
+                type: 'reasoning.encrypted',
+                data: data,
+                format: getFormatForModel(),
+            };
+            details.push(detail);
+        };
+        if (typeof message.signature === 'string') {
+            addDetail(message.signature);
+            delete message.signature;
+        }
+        if (Array.isArray(message.tool_calls)) {
+            message.tool_calls.forEach((toolCall) => {
+                if (typeof toolCall.signature === 'string') {
+                    addDetail(toolCall.signature, toolCall.id);
+                    delete toolCall.signature;
+                }
+            });
+        }
+        if (details.length > 0) {
+            message.reasoning_details = details;
+        }
     }
 }
