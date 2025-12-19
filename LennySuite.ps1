@@ -104,6 +104,16 @@ $extensions = (
 	# "SillyTavern-WorldInfoSwitch",
 	# "SillyTavern-ChatSearch",
 	# "SillyTavern-QuickRepliesDrawer",
+	# "SillyTavern-ApiKeyHelper",
+	# "SillyTavern-ChatDrawer",
+	# "SillyTavern-FilesPluginApi",
+	# "SillyTavern-GoReadABook",
+	# "SillyTavern-LATheme",
+	# "SillyTavern-NotJustButtons",
+	# "SillyTavern-NovelMode",
+	# "SillyTavern-QuipQuiver",
+	# "SillyTavern-SlashCommandChanges",
+	# "SillyTavern-ToastHistory",
 	"" # keep only this last line if you don't want to update extensions
 )
 # -----------------------------------------------------------------------
